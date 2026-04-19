@@ -1,6 +1,10 @@
 import Foundation
 import SwiftUI
 
+private enum StorageKey {
+    static let profile = "connectionProfile"
+}
+
 @MainActor
 final class AppState: ObservableObject {
     @Published var profile = ConnectionProfile()
@@ -13,6 +17,8 @@ final class AppState: ObservableObject {
 
     /// Ephemeral field for typing a password; saved to Keychain on Connect when non-empty.
     @Published var passwordEntry: String = ""
+
+    private var savedProfile: ConnectionProfile?
 
     /// Whether Keychain already has a password for the current host/port/username.
     @Published private(set) var hasKeychainPasswordForProfile = false
@@ -48,6 +54,27 @@ final class AppState: ObservableObject {
         }
 
         refreshKeychainPasswordState()
+        loadProfile()
+    }
+
+    private func loadProfile() {
+        guard let data = UserDefaults.standard.data(forKey: StorageKey.profile),
+              let loaded = try? JSONDecoder().decode(ConnectionProfile.self, from: data) else {
+            return
+        }
+        profile = loaded
+        savedProfile = loaded
+    }
+
+    func saveProfile() {
+        guard let data = try? JSONEncoder().encode(profile) else { return }
+        UserDefaults.standard.set(data, forKey: StorageKey.profile)
+        savedProfile = profile
+    }
+
+    func resetProfile() {
+        profile = savedProfile ?? ConnectionProfile()
+        passwordEntry = ""
     }
 
     func refreshKeychainPasswordState() {
