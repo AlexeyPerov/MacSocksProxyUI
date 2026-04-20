@@ -1,6 +1,12 @@
 import Foundation
 import Security
 
+protocol SecureDataStore {
+    func saveData(_ data: Data, account: String, service: String) throws
+    func loadData(account: String, service: String) throws -> Data?
+    func deleteData(account: String, service: String) throws
+}
+
 enum KeychainServiceError: Error, LocalizedError {
     case unexpectedStatus(OSStatus)
     case invalidPasswordData
@@ -25,10 +31,27 @@ final class KeychainService {
     }
 
     func savePassword(_ password: String, account: String) throws {
-        let data = Data(password.utf8)
+        try saveData(Data(password.utf8), account: account, service: Self.serviceIdentifier)
+    }
+
+    func loadPassword(account: String) throws -> String? {
+        guard let data = try loadData(account: account, service: Self.serviceIdentifier) else {
+            return nil
+        }
+        guard let password = String(data: data, encoding: .utf8) else {
+            throw KeychainServiceError.invalidPasswordData
+        }
+        return password
+    }
+
+    func deletePassword(account: String) throws {
+        try deleteData(account: account, service: Self.serviceIdentifier)
+    }
+
+    func saveData(_ data: Data, account: String, service: String) throws {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: Self.serviceIdentifier,
+            kSecAttrService as String: service,
             kSecAttrAccount as String: account
         ]
 
@@ -49,10 +72,10 @@ final class KeychainService {
         }
     }
 
-    func loadPassword(account: String) throws -> String? {
+    func loadData(account: String, service: String) throws -> Data? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: Self.serviceIdentifier,
+            kSecAttrService as String: service,
             kSecAttrAccount as String: account,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne
@@ -66,17 +89,13 @@ final class KeychainService {
         guard status == errSecSuccess else {
             throw KeychainServiceError.unexpectedStatus(status)
         }
-        guard let data = result as? Data,
-              let password = String(data: data, encoding: .utf8) else {
-            throw KeychainServiceError.invalidPasswordData
-        }
-        return password
+        return result as? Data
     }
 
-    func deletePassword(account: String) throws {
+    func deleteData(account: String, service: String) throws {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: Self.serviceIdentifier,
+            kSecAttrService as String: service,
             kSecAttrAccount as String: account
         ]
         let status = SecItemDelete(query as CFDictionary)
@@ -89,3 +108,5 @@ final class KeychainService {
         (try? loadPassword(account: account)) != nil
     }
 }
+
+extension KeychainService: SecureDataStore {}

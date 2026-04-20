@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import MacProxyCore
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -15,5 +16,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.statusBarController.updateStatus(status)
             }
             .store(in: &cancellables)
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        appState.prepareForTermination()
     }
 }

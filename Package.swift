@@ -7,6 +7,7 @@ let package = Package(
         .macOS(.v13)
     ],
     products: [
+        .library(name: "MacProxyCore", targets: ["MacProxyCore"]),
         .executable(name: "MacProxyUI", targets: ["MacProxyUI"]),
         .executable(name: "AskpassHelper", targets: ["AskpassHelper"])
     ],
@@ -16,32 +17,63 @@ let package = Package(
             path: "Tools",
             sources: ["AskpassHelper.swift"]
         ),
-        .executableTarget(
-            name: "MacProxyUI",
+        .target(
+            name: "MacProxyCore",
             dependencies: [],
             path: ".",
             exclude: [
                 "Tools",
                 "Packaging",
                 "scripts",
-                "QA_DOD_REPORT.md",
+                "Tests",
+                "LICENSE",
+                "Tray",
+                "Views",
+                "MacProxyUIApp.swift",
+                "AppDelegate.swift",
                 "README.md"
             ],
             sources: [
-                "MacProxyUIApp.swift",
-                "AppDelegate.swift",
                 "State/AppState.swift",
+                "State/ProfileStore.swift",
                 "Models/ConnectionProfile.swift",
                 "Models/ProxyStatus.swift",
                 "Services/SshProcessService.swift",
                 "Services/KeychainService.swift",
                 "Services/HealthCheckService.swift",
                 "Services/ReconnectCoordinator.swift",
+                "Services/ReconnectPolicy.swift",
                 "Services/PortProbeService.swift",
+                "Services/DiagnosticsStore.swift"
+            ]
+        ),
+        .executableTarget(
+            name: "MacProxyUI",
+            dependencies: ["MacProxyCore"],
+            path: ".",
+            exclude: [
+                "Tools",
+                "Packaging",
+                "State",
+                "Models",
+                "Services",
+                "scripts",
+                "Tests",
+                "LICENSE",
+                "README.md"
+            ],
+            sources: [
+                "MacProxyUIApp.swift",
+                "AppDelegate.swift",
                 "Views/MainView.swift",
                 "Views/SettingsView.swift",
                 "Tray/StatusBarController.swift"
             ]
+        ),
+        .testTarget(
+            name: "MacProxyCoreTests",
+            dependencies: ["MacProxyCore"],
+            path: "Tests/MacProxyCoreTests"
         )
     ]
 )

@@ -1,43 +1,47 @@
 import Foundation
 
-/// Schedules a single delayed reconnect on the main run loop.
+/// Schedules reconnect attempts and provides countdown ticks.
 final class ReconnectCoordinator {
-    private var timer: Timer?
-    private let interval: TimeInterval
+    private var reconnectTask: Task<Void, Never>?
 
-    init(interval: TimeInterval = 7) {
-        self.interval = interval
-    }
-
-    func scheduleReconnect(action: @escaping @MainActor () -> Void) {
-        let work = { [weak self] in
+    func scheduleReconnect(
+        after delaySeconds: Int,
+        onTick: (@MainActor (Int) -> Void)? = nil,
+        action: @escaping @MainActor () -> Void
+    ) {
+        let scheduleWork = { [weak self] in
             guard let self else { return }
             self.invalidate()
-            self.timer = Timer.scheduledTimer(withTimeInterval: self.interval, repeats: false) { _ in
-                Task { @MainActor in
-                    action()
+            self.reconnectTask = Task { @MainActor [weak self] in
+                guard let self else { return }
+                let clampedDelay = max(1, delaySeconds)
+                for second in stride(from: clampedDelay, through: 1, by: -1) {
+                    guard !Task.isCancelled else { return }
+                    onTick?(second)
+                    try? await Task.sleep(for: .seconds(1))
                 }
-            }
-            if let timer = self.timer {
-                RunLoop.main.add(timer, forMode: .common)
+                guard !Task.isCancelled else { return }
+                action()
+                self.reconnectTask = nil
             }
         }
+
         if Thread.isMainThread {
-            work()
+            scheduleWork()
         } else {
-            DispatchQueue.main.async(execute: work)
+            DispatchQueue.main.async(execute: scheduleWork)
         }
     }
 
     func invalidate() {
-        let work = { [weak self] in
-            self?.timer?.invalidate()
-            self?.timer = nil
+        let invalidateWork = { [weak self] in
+            self?.reconnectTask?.cancel()
+            self?.reconnectTask = nil
         }
         if Thread.isMainThread {
-            work()
+            invalidateWork()
         } else {
-            DispatchQueue.main.async(execute: work)
+            DispatchQueue.main.async(execute: invalidateWork)
         }
     }
 }

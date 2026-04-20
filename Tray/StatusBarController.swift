@@ -1,4 +1,5 @@
 import AppKit
+import MacProxyCore
 
 @MainActor
 final class StatusBarController: NSObject {
@@ -47,6 +48,10 @@ final class StatusBarController: NSObject {
             symbolName = "circle.dotted"
             tint = .systemYellow
             label = "…"
+        case .reconnecting:
+            symbolName = "arrow.clockwise.circle.fill"
+            tint = .systemOrange
+            label = "↻"
         case .connected:
             symbolName = "circle.fill"
             tint = .systemGreen
@@ -62,7 +67,11 @@ final class StatusBarController: NSObject {
         }
 
         let config = NSImage.SymbolConfiguration(pointSize: 11, weight: .semibold)
-        let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "Proxy status: \(status.title)")?
+        var accessibilityDescription = "Proxy status: \(status.title)"
+        if let details = status.details {
+            accessibilityDescription += ". \(details)"
+        }
+        let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: accessibilityDescription)?
             .withSymbolConfiguration(config)
         button.image = image
         button.contentTintColor = tint
@@ -80,13 +89,13 @@ final class StatusBarController: NSObject {
         let canDisconnect: Bool
 
         switch status {
-        case .connecting, .connected:
+        case .connecting, .reconnecting, .connected, .degraded:
             canConnect = false
             canDisconnect = true
         case .disconnected:
             canConnect = true
             canDisconnect = false
-        case .degraded, .error:
+        case .error:
             canConnect = true
             canDisconnect = true
         }
@@ -135,6 +144,10 @@ final class StatusBarController: NSObject {
 
         menu.addItem(NSMenuItem.separator())
 
+        let showWindow = NSMenuItem(title: "Show Window", action: #selector(showWindow), keyEquivalent: "")
+        showWindow.target = self
+        menu.addItem(showWindow)
+
         let settings = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
         settings.keyEquivalentModifierMask = [.command]
         settings.target = self
@@ -161,7 +174,15 @@ final class StatusBarController: NSObject {
     @objc private func openSettings() {
         NSApp.activate(ignoringOtherApps: true)
         appState?.isSettingsPresented = true
+        bringWindowToFront()
+    }
 
+    @objc private func showWindow() {
+        NSApp.activate(ignoringOtherApps: true)
+        bringWindowToFront()
+    }
+
+    private func bringWindowToFront() {
         let windows = NSApp.windows
         if let key = windows.first(where: { $0.isKeyWindow }) {
             key.makeKeyAndOrderFront(nil)

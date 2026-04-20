@@ -1,55 +1,70 @@
 import Foundation
+import os
+import AppKit
 import SwiftUI
 
-private enum StorageKey {
-    static let profile = "connectionProfile"
-}
-
 @MainActor
-final class AppState: ObservableObject {
-    @Published var profile = ConnectionProfile()
-    @Published var status: ProxyStatus = .disconnected
-    @Published var statusMessage: String = ""
-    @Published var externalIP: String = "-"
+public final class AppState: ObservableObject {
+    @Published public var profile = ConnectionProfile()
+    @Published public var status: ProxyStatus = .disconnected
+    @Published public var externalIP: String = "-"
 
     /// Drives the Settings sheet from both the main window and the menu bar.
-    @Published var isSettingsPresented = false
+    @Published public var isSettingsPresented = false
 
     /// Ephemeral field for typing a password; saved to Keychain on Connect when non-empty.
-    @Published var passwordEntry: String = ""
+    @Published public var passwordEntry: String = ""
 
     private var savedProfile: ConnectionProfile?
 
     /// Whether Keychain already has a password for the current host/port/username.
-    @Published private(set) var hasKeychainPasswordForProfile = false
+    @Published public private(set) var hasKeychainPasswordForProfile = false
 
     private let sshService: SshProcessService
     private let healthCheckService: HealthCheckService
     private let reconnectCoordinator: ReconnectCoordinator
     private let keychainService: KeychainService
+    private let profileStore: ProfileStore
+    private let diagnosticsStore: DiagnosticsStore
+    private let reconnectPolicy: ReconnectPolicy
+    private let logger = Logger(subsystem: "com.macproxyui.app", category: "ssh")
 
     private var manuallyDisconnected = false
     private var connectProbeTask: Task<Void, Never>?
     private var healthMonitorTask: Task<Void, Never>?
+    private var reconnectAttempt = 0
 
     private let healthCheckInterval: Duration = .seconds(45)
     private let initialSocksProbeInterval: Duration = .milliseconds(250)
     private let initialSocksProbeTimeout: Duration = .seconds(4)
 
     init(
-        sshService: SshProcessService = SshProcessService(),
-        healthCheckService: HealthCheckService = HealthCheckService(),
-        reconnectCoordinator: ReconnectCoordinator = ReconnectCoordinator(),
-        keychainService: KeychainService = KeychainService()
+        sshService: SshProcessService,
+        healthCheckService: HealthCheckService,
+        reconnectCoordinator: ReconnectCoordinator,
+        keychainService: KeychainService,
+        profileStore: ProfileStore? = nil,
+        diagnosticsStore: DiagnosticsStore,
+        reconnectPolicy: ReconnectPolicy
     ) {
+        let resolvedProfileStore = profileStore ?? ProfileStore(secureStore: keychainService)
         self.sshService = sshService
         self.healthCheckService = healthCheckService
         self.reconnectCoordinator = reconnectCoordinator
         self.keychainService = keychainService
+        self.profileStore = resolvedProfileStore
+        self.diagnosticsStore = diagnosticsStore
+        self.reconnectPolicy = reconnectPolicy
 
         sshService.onTermination = { [weak self] info in
             Task { @MainActor in
                 self?.handleTermination(info: info)
+            }
+        }
+        sshService.onStderrLine = { [weak self] line in
+            self?.logger.info("ssh stderr: \(line, privacy: .public)")
+            Task { @MainActor [weak self] in
+                self?.diagnosticsStore.append(line)
             }
         }
 
@@ -57,32 +72,54 @@ final class AppState: ObservableObject {
         loadProfile()
     }
 
+    public convenience init() {
+        let keychain = KeychainService()
+        self.init(
+            sshService: SshProcessService(),
+            healthCheckService: HealthCheckService(),
+            reconnectCoordinator: ReconnectCoordinator(),
+            keychainService: keychain,
+            profileStore: nil,
+            diagnosticsStore: DiagnosticsStore(),
+            reconnectPolicy: ReconnectPolicy()
+        )
+    }
+
     private func loadProfile() {
-        guard let data = UserDefaults.standard.data(forKey: StorageKey.profile),
-              let loaded = try? JSONDecoder().decode(ConnectionProfile.self, from: data) else {
-            return
+        if let loaded = profileStore.load() {
+            profile = loaded
+            savedProfile = loaded
         }
-        profile = loaded
-        savedProfile = loaded
+        Task {
+            await healthCheckService.updateExternalIPCheck(
+                enabled: profile.externalIPCheckEnabled,
+                urlString: profile.externalIPCheckURL
+            )
+        }
     }
 
-    func saveProfile() {
-        guard let data = try? JSONEncoder().encode(profile) else { return }
-        UserDefaults.standard.set(data, forKey: StorageKey.profile)
+    public func saveProfile() {
+        profileStore.save(profile)
         savedProfile = profile
+        Task {
+            await healthCheckService.updateExternalIPCheck(
+                enabled: profile.externalIPCheckEnabled,
+                urlString: profile.externalIPCheckURL
+            )
+        }
     }
 
-    func resetProfile() {
+    public func resetProfile() {
         profile = savedProfile ?? ConnectionProfile()
         passwordEntry = ""
     }
 
-    func refreshKeychainPasswordState() {
+    public func refreshKeychainPasswordState() {
         let account = KeychainService.accountIdentifier(for: profile)
         hasKeychainPasswordForProfile = keychainService.hasPassword(account: account)
     }
 
-    func removeSavedPasswordFromKeychain() {
+    public func removeSavedPasswordFromKeychain() {
         let account = KeychainService.accountIdentifier(for: profile)
         do {
             try keychainService.deletePassword(account: account)
@@ -92,9 +129,13 @@ final class AppState: ObservableObject {
         }
     }
 
-    func connect() {
+    public func connect() {
         guard profile.isValid else {
             status = .error("Please fill host, username, and ports.")
+            return
+        }
+        guard profile.hasValidExternalIPCheckURL else {
+            status = .error("External IP check URL must be a valid HTTPS URL.")
             return
         }
 
@@ -123,7 +164,7 @@ final class AppState: ObservableObject {
 
             guard let askpassURL = SshAskpassConfiguration.resolveHelperExecutableURL() else {
                 status = .error(
-                    "Could not find AskpassHelper next to MacProxyUI. Rebuild so AskpassHelper is produced alongside the app."
+                    "Password login requires AskpassHelper inside the app bundle. Reinstall MacProxyUI or rebuild the full app package."
                 )
                 return
             }
@@ -132,6 +173,8 @@ final class AppState: ObservableObject {
         }
 
         manuallyDisconnected = false
+        reconnectAttempt = 0
+        reconnectCoordinator.invalidate()
         status = .connecting
         externalIP = "-"
         connectProbeTask?.cancel()
@@ -142,6 +185,10 @@ final class AppState: ObservableObject {
             try sshService.start(profile: profile, environment: sshEnvironment)
             connectProbeTask = Task { [weak self] in
                 guard let self else { return }
+                await self.healthCheckService.updateExternalIPCheck(
+                    enabled: self.profile.externalIPCheckEnabled,
+                    urlString: self.profile.externalIPCheckURL
+                )
                 await self.finishStartupHealthCheck()
             }
         } catch {
@@ -149,8 +196,9 @@ final class AppState: ObservableObject {
         }
     }
 
-    func disconnect() {
+    public func disconnect() {
         manuallyDisconnected = true
+        reconnectAttempt = 0
         reconnectCoordinator.invalidate()
         connectProbeTask?.cancel()
         connectProbeTask = nil
@@ -163,6 +211,44 @@ final class AppState: ObservableObject {
                 self?.status = .disconnected
             }
         }
+    }
+
+    public func prepareForTermination() {
+        manuallyDisconnected = true
+        reconnectAttempt = 0
+        reconnectCoordinator.invalidate()
+        connectProbeTask?.cancel()
+        connectProbeTask = nil
+        healthMonitorTask?.cancel()
+        healthMonitorTask = nil
+        externalIP = "-"
+        sshService.stop()
+        status = .disconnected
+    }
+
+    public var canConnectFromUI: Bool {
+        guard !sshService.isRunning else { return false }
+        switch status {
+        case .connecting, .reconnecting, .connected, .degraded:
+            return false
+        case .disconnected, .error:
+            return true
+        }
+    }
+
+    public var canDisconnectFromUI: Bool {
+        sshService.isRunning || status != .disconnected
+    }
+
+    public var needsInitialSetup: Bool {
+        !profile.isValid
+    }
+
+    public func copyDiagnosticsToPasteboard() {
+        let text = diagnosticsStore.render(status: status, profile: profile, externalIP: externalIP)
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
     }
 
     private func startHealthMonitoring() {
@@ -192,7 +278,11 @@ final class AppState: ObservableObject {
                         }
                     } else {
                         self.externalIP = "-"
-                        self.status = .degraded("External IP check through SOCKS failed (proxy may be partial).")
+                        if self.profile.externalIPCheckEnabled {
+                            self.status = .degraded("External IP check through SOCKS failed (proxy may be partial).")
+                        } else {
+                            self.status = .connected
+                        }
                     }
                 }
             }
@@ -232,14 +322,18 @@ final class AppState: ObservableObject {
         let externalIP = await healthCheckService.fetchExternalIPThroughSocks(localPort: localPort)
         guard !Task.isCancelled else { return }
 
-        if let externalIP {
+        if profile.externalIPCheckEnabled, let externalIP {
             self.externalIP = externalIP
             status = .connected
-        } else {
+        } else if profile.externalIPCheckEnabled {
             self.externalIP = "-"
             status = .degraded("SOCKS port is open, but the external IP check via proxy failed.")
+        } else {
+            self.externalIP = "-"
+            status = .connected
         }
 
+        reconnectAttempt = 0
         startHealthMonitoring()
     }
 
@@ -250,11 +344,7 @@ final class AppState: ObservableObject {
         connectProbeTask?.cancel()
         connectProbeTask = nil
 
-        status = .error("SOCKS proxy stopped responding. Reconnecting...")
-        reconnectCoordinator.invalidate()
-        reconnectCoordinator.scheduleReconnect { [weak self] in
-            self?.connect()
-        }
+        scheduleReconnect(reason: "SOCKS proxy stopped responding.")
 
         Task.detached { [sshService] in
             sshService.stop()
@@ -270,17 +360,55 @@ final class AppState: ObservableObject {
 
         if manuallyDisconnected {
             status = .disconnected
+            reconnectAttempt = 0
             return
         }
 
         let message = SshProcessService.humanReadableMessage(for: info)
+        guard reconnectPolicy.shouldRetry(parsedFailure: info.parsedFailure) else {
+            switch info.parsedFailure {
+            case .hostKeyVerificationFailed:
+                status = .error("\(message) Auto-reconnect stopped. Confirm and trust the host key, then connect again.")
+            case .authenticationFailed, .permissionDenied:
+                status = .error("\(message) Auto-reconnect stopped. Update credentials in Settings and reconnect.")
+            default:
+                status = .error("\(message) Auto-reconnect stopped.")
+            }
+            reconnectAttempt = 0
+            return
+        }
+
+        let retryReason: String
         if let code = info.exitCodeOrSignal {
-            status = .error("\(message) (details: code \(code)). Reconnecting...")
+            retryReason = "\(message) (code \(code))."
         } else {
-            status = .error("\(message). Reconnecting...")
+            retryReason = message
         }
-        reconnectCoordinator.scheduleReconnect { [weak self] in
-            self?.connect()
+        scheduleReconnect(reason: retryReason)
+    }
+
+    private func scheduleReconnect(reason: String) {
+        reconnectCoordinator.invalidate()
+        if reconnectAttempt >= reconnectPolicy.maxAttempts {
+            status = .error("\(reason) Reconnect attempts exhausted. Open Settings, fix configuration, then reconnect.")
+            reconnectAttempt = 0
+            return
         }
+
+        reconnectAttempt += 1
+        let delay = reconnectPolicy.delaySeconds(forAttempt: reconnectAttempt)
+        reconnectCoordinator.scheduleReconnect(
+            after: delay,
+            onTick: { [weak self] remaining in
+                guard let self else { return }
+                self.status = .reconnecting(
+                    remainingSeconds: remaining,
+                    reason: "\(reason) Attempt \(self.reconnectAttempt) of \(self.reconnectPolicy.maxAttempts)."
+                )
+            },
+            action: { [weak self] in
+                self?.connect()
+            }
+        )
     }
 }
