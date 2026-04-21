@@ -140,6 +140,7 @@ struct SettingsView: View {
                 .padding(.top)
             }
         }
+        .padding(10)
         .frame(minWidth: 420)
         .onAppear {
             loadCurrentValues()
