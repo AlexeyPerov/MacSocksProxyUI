@@ -66,6 +66,9 @@ final class StatusBarController: NSObject {
             label = "Err"
         }
 
+        let isDarkMode = button.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        let finalTint: NSColor = isDarkMode ? .white : tint
+
         let config = NSImage.SymbolConfiguration(pointSize: 11, weight: .semibold)
         var accessibilityDescription = "Proxy status: \(status.title)"
         if let details = status.details {
@@ -74,8 +77,16 @@ final class StatusBarController: NSObject {
         let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: accessibilityDescription)?
             .withSymbolConfiguration(config)
         button.image = image
-        button.contentTintColor = tint
+        button.contentTintColor = finalTint
         button.title = " \(label)"
+        if isDarkMode {
+            button.attributedTitle = NSAttributedString(
+                string: " \(label)",
+                attributes: [.foregroundColor: NSColor.white]
+            )
+        } else {
+            button.attributedTitle = NSAttributedString(string: " \(label)")
+        }
 
         var tip = "MacProxyUI — \(status.title)"
         if let details = status.details {
