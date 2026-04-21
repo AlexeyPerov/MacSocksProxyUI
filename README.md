@@ -1,6 +1,9 @@
 # MacProxyUI
 
-Minimal macOS menu bar app that starts an SSH dynamic port forward and verifies the local SOCKS proxy with periodic health checks.
+Minimal macOS app to manage SSH connection.
+Using provided settings it starts an SSH dynamic port forward and verifies the local SOCKS proxy with periodic health checks and handles reconnects.
+
+![plot](./Screenshots/proxy-ui-main.png) 
 
 ## Build
 
