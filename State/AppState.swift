@@ -3,11 +3,41 @@ import os
 import AppKit
 import SwiftUI
 
+public struct MainScreenEvent: Identifiable, Equatable {
+    public enum Source: Equatable {
+        case system
+        case status
+        case diagnostics
+    }
+
+    public let id = UUID()
+    public let timestamp: Date
+    public let message: String
+    public let source: Source
+
+    public var timestampLabel: String {
+        MainScreenEvent.timestampFormatter.string(from: timestamp)
+    }
+
+    private static let timestampFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "HH:mm:ss.SSS"
+        return formatter
+    }()
+}
+
 @MainActor
 public final class AppState: ObservableObject {
     @Published public var profile = ConnectionProfile()
-    @Published public var status: ProxyStatus = .disconnected
+    @Published public var status: ProxyStatus = .disconnected {
+        didSet {
+            guard status != oldValue else { return }
+            appendStatusTransition(from: oldValue, to: status)
+        }
+    }
     @Published public var externalIP: String = "-"
+    @Published public private(set) var mainScreenEvents: [MainScreenEvent] = []
 
     /// Drives the Settings sheet from both the main window and the menu bar.
     @Published public var isSettingsPresented = false
@@ -28,6 +58,7 @@ public final class AppState: ObservableObject {
     private let diagnosticsStore: DiagnosticsStore
     private let reconnectPolicy: ReconnectPolicy
     private let logger = Logger(subsystem: "com.macproxyui.app", category: "ssh")
+    private let maxMainScreenEvents = 200
 
     private var manuallyDisconnected = false
     private var connectProbeTask: Task<Void, Never>?
@@ -65,11 +96,13 @@ public final class AppState: ObservableObject {
             self?.logger.info("ssh stderr: \(line, privacy: .public)")
             Task { @MainActor [weak self] in
                 self?.diagnosticsStore.append(line)
+                self?.appendEvent(message: line, source: .diagnostics)
             }
         }
 
         refreshKeychainPasswordState()
         loadProfile()
+        appendEvent(message: launchSettingsSummary(), source: .system)
     }
 
     public convenience init() {
@@ -90,6 +123,7 @@ public final class AppState: ObservableObject {
             profile = loaded
             savedProfile = loaded
         }
+        refreshKeychainPasswordState()
         Task {
             await healthCheckService.updateExternalIPCheck(
                 enabled: profile.externalIPCheckEnabled,
@@ -99,6 +133,7 @@ public final class AppState: ObservableObject {
     }
 
     public func saveProfile() {
+        let previousProfile = savedProfile ?? ConnectionProfile()
         profileStore.save(profile)
         savedProfile = profile
         Task {
@@ -107,6 +142,10 @@ public final class AppState: ObservableObject {
                 urlString: profile.externalIPCheckURL
             )
         }
+        appendEvent(
+            message: "Settings saved: \(profileSummary(profile)) (changed: \(profileDiffSummary(from: previousProfile, to: profile))).",
+            source: .system
+        )
     }
 
     public func resetProfile() {
@@ -130,6 +169,10 @@ public final class AppState: ObservableObject {
     }
 
     public func connect() {
+        appendEvent(
+            message: "Connect requested: destination=\(profile.destination), sshPort=\(profile.sshPort), socksPort=\(profile.localSocksPort), auth=\(profile.useKeyAuthentication ? "key" : "password"), ipCheck=\(profile.externalIPCheckEnabled ? "on" : "off").",
+            source: .system
+        )
         guard profile.isValid else {
             status = .error("Please fill host, username, and ports.")
             return
@@ -183,6 +226,10 @@ public final class AppState: ObservableObject {
 
         do {
             try sshService.start(profile: profile, environment: sshEnvironment)
+            appendEvent(
+                message: "SSH process started (pid active), waiting for local SOCKS \(profile.localSocksPort) readiness.",
+                source: .system
+            )
             connectProbeTask = Task { [weak self] in
                 guard let self else { return }
                 await self.healthCheckService.updateExternalIPCheck(
@@ -318,6 +365,10 @@ public final class AppState: ObservableObject {
             status = .degraded("SSH started, but the local SOCKS proxy did not become ready in time.")
             return
         }
+        appendEvent(
+            message: "SOCKS readiness check passed on localhost:\(localPort); validating external route.",
+            source: .system
+        )
 
         let externalIP = await healthCheckService.fetchExternalIPThroughSocks(localPort: localPort)
         guard !Task.isCancelled else { return }
@@ -325,12 +376,24 @@ public final class AppState: ObservableObject {
         if profile.externalIPCheckEnabled, let externalIP {
             self.externalIP = externalIP
             status = .connected
+            appendEvent(
+                message: "Tunnel established: SOCKS localhost:\(localPort), externalIP=\(externalIP), mode=full.",
+                source: .system
+            )
         } else if profile.externalIPCheckEnabled {
             self.externalIP = "-"
             status = .degraded("SOCKS port is open, but the external IP check via proxy failed.")
+            appendEvent(
+                message: "Tunnel partial: SOCKS localhost:\(localPort) is up but external IP check failed.",
+                source: .system
+            )
         } else {
             self.externalIP = "-"
             status = .connected
+            appendEvent(
+                message: "Tunnel established: SOCKS localhost:\(localPort), external IP check disabled by settings.",
+                source: .system
+            )
         }
 
         reconnectAttempt = 0
@@ -410,5 +473,61 @@ public final class AppState: ObservableObject {
                 self?.connect()
             }
         )
+    }
+
+    private func appendStatusTransition(from previous: ProxyStatus, to next: ProxyStatus) {
+        if case .reconnecting = previous, case .reconnecting = next {
+            return
+        }
+
+        let message: String
+        switch next {
+        case .connecting:
+            message = "Status -> Connecting (destination=\(profile.destination), sshPort=\(profile.sshPort), socksPort=\(profile.localSocksPort))."
+        case .connected:
+            message = "Status -> Connected (destination=\(profile.destination), socksPort=\(profile.localSocksPort), externalIP=\(externalIP))."
+        default:
+            if let details = next.details {
+                let compactDetails = details.replacingOccurrences(of: "\n", with: " ")
+                message = "\(next.title): \(compactDetails)"
+            } else {
+                message = next.title
+            }
+        }
+        appendEvent(message: message, source: .status)
+    }
+
+    private func appendEvent(message: String, source: MainScreenEvent.Source) {
+        let event = MainScreenEvent(timestamp: Date(), message: message, source: source)
+        mainScreenEvents.insert(event, at: 0)
+        if mainScreenEvents.count > maxMainScreenEvents {
+            mainScreenEvents.removeLast(mainScreenEvents.count - maxMainScreenEvents)
+        }
+    }
+
+    private func launchSettingsSummary() -> String {
+        let profileDescription = profileSummary(profile)
+        let keychainState = hasKeychainPasswordForProfile ? "keychainPassword=present" : "keychainPassword=missing"
+        return "Launched: loaded settings { \(profileDescription), \(keychainState) }."
+    }
+
+    private func profileSummary(_ profile: ConnectionProfile) -> String {
+        let ipCheck = profile.externalIPCheckEnabled ? "on" : "off"
+        let auth = profile.useKeyAuthentication ? "key" : "password"
+        let label = profile.name.isEmpty ? "Default" : profile.name
+        return "name=\(label), destination=\(profile.destination), sshPort=\(profile.sshPort), socksPort=\(profile.localSocksPort), auth=\(auth), ipCheck=\(ipCheck)"
+    }
+
+    private func profileDiffSummary(from old: ConnectionProfile, to new: ConnectionProfile) -> String {
+        var changed: [String] = []
+        if old.name != new.name { changed.append("name") }
+        if old.host != new.host { changed.append("host") }
+        if old.username != new.username { changed.append("username") }
+        if old.sshPort != new.sshPort { changed.append("sshPort") }
+        if old.localSocksPort != new.localSocksPort { changed.append("socksPort") }
+        if old.useKeyAuthentication != new.useKeyAuthentication { changed.append("authMode") }
+        if old.externalIPCheckEnabled != new.externalIPCheckEnabled { changed.append("ipCheckEnabled") }
+        if old.externalIPCheckURL != new.externalIPCheckURL { changed.append("ipCheckURL") }
+        return changed.isEmpty ? "none" : changed.joined(separator: ",")
     }
 }

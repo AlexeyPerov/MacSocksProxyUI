@@ -57,74 +57,89 @@ struct SettingsView: View {
     }
 
     var body: some View {
-        Form {
-            TextField("Profile Name", text: $name)
-            TextField("Host", text: $host)
-            TextField("Username", text: $username)
-            TextField("SSH Port", value: $sshPort, formatter: NumberFormatter())
-            TextField("Local SOCKS Port", value: $localSocksPort, formatter: NumberFormatter())
-            Toggle("Use SSH key authentication", isOn: $useKeyAuthentication)
-
-            Divider()
-            Toggle("Check external IP through proxy", isOn: $externalIPCheckEnabled)
-            if externalIPCheckEnabled {
-                TextField("External IP check URL (HTTPS)", text: $externalIPCheckURL)
-                    .disableAutocorrection(true)
-            }
-
-            if !validationErrors.isEmpty {
-                VStack(alignment: .leading, spacing: 4) {
-                    ForEach(validationErrors, id: \.self) { error in
-                        Label(error, systemImage: "xmark.circle.fill")
-                            .font(.footnote)
-                            .foregroundStyle(.red)
-                    }
-                }
-            }
-
-            if !useKeyAuthentication {
-                Divider()
-                SecureField("SSH password (saved to Keychain)", text: $passwordEntry)
-                    .textContentType(.password)
-
-                HStack(alignment: .top) {
-                    Text(
-                        appState.hasKeychainPasswordForProfile
-                            ? "A password for this user@host:port is stored in Keychain. Enter a new password here to replace it on Connect."
-                            : "Enter your SSH password before Connect. It is saved to Keychain and reused for reconnects."
-                    )
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    Spacer(minLength: 8)
-                    Button("Remove from Keychain") {
-                        showDeletePasswordConfirmation = true
-                    }
-                    .disabled(!appState.hasKeychainPasswordForProfile)
-                }
-            }
-
+        VStack(spacing: 0) {
             HStack {
+                Button {
+                    closeAsCancel()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 12, weight: .semibold))
+                        .frame(width: 24, height: 24)
+                        .background(Circle().fill(.quaternary))
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut(.escape)
+                .accessibilityLabel("Close settings")
+
                 Spacer()
-                Button("Discard changes") {
-                    if hasUnsavedChanges {
-                        showDiscardConfirmation = true
-                    } else {
-                        appState.resetProfile()
+            }
+            .padding(.horizontal)
+            .padding(.top, 10)
+            .padding(.bottom, 4)
+
+            Form {
+                TextField("Profile Name", text: $name)
+                TextField("Host", text: $host)
+                TextField("Username", text: $username)
+                TextField("SSH Port", value: $sshPort, formatter: NumberFormatter())
+                TextField("Local SOCKS Port", value: $localSocksPort, formatter: NumberFormatter())
+                Toggle("Use SSH key authentication", isOn: $useKeyAuthentication)
+
+                Divider()
+                Toggle("Check external IP through proxy", isOn: $externalIPCheckEnabled)
+                if externalIPCheckEnabled {
+                    TextField("External IP check URL (HTTPS)", text: $externalIPCheckURL)
+                        .disableAutocorrection(true)
+                }
+
+                if !validationErrors.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(validationErrors, id: \.self) { error in
+                            Label(error, systemImage: "xmark.circle.fill")
+                                .font(.footnote)
+                                .foregroundStyle(.red)
+                        }
+                    }
+                }
+
+                if !useKeyAuthentication {
+                    Divider()
+                    SecureField(passwordPlaceholder, text: $passwordEntry)
+                        .textContentType(.password)
+
+                    HStack(alignment: .top) {
+                        Text(
+                            appState.hasKeychainPasswordForProfile
+                                ? "A password for this user@host:port is stored in Keychain. Enter a new password here to replace it on Connect."
+                                : "Enter your SSH password before Connect. It is saved to Keychain and reused for reconnects."
+                        )
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        Spacer(minLength: 8)
+                        Button("Remove from Keychain") {
+                            showDeletePasswordConfirmation = true
+                        }
+                        .disabled(!appState.hasKeychainPasswordForProfile)
+                    }
+                }
+
+                HStack {
+                    Spacer()
+                    Button("Discard changes") {
+                        closeAsCancel()
+                    }
+                    .keyboardShortcut(.escape)
+                    Button("Save") {
+                        saveSettings()
                         appState.isSettingsPresented = false
                     }
+                    .keyboardShortcut(.return)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!validationErrors.isEmpty)
                 }
-                .keyboardShortcut(.escape)
-                Button("Save") {
-                    saveSettings()
-                    appState.isSettingsPresented = false
-                }
-                .keyboardShortcut(.return)
-                .buttonStyle(.borderedProminent)
-                .disabled(!validationErrors.isEmpty)
+                .padding(.top)
             }
-            .padding(.top)
         }
-        .padding()
         .frame(minWidth: 420)
         .onAppear {
             loadCurrentValues()
@@ -166,6 +181,22 @@ struct SettingsView: View {
         externalIPCheckEnabled = profile.externalIPCheckEnabled
         externalIPCheckURL = profile.externalIPCheckURL
         passwordEntry = appState.passwordEntry
+    }
+
+    private var passwordPlaceholder: String {
+        if appState.hasKeychainPasswordForProfile {
+            return "Password already in Keychain"
+        }
+        return "SSH password (saved to Keychain)"
+    }
+
+    private func closeAsCancel() {
+        if hasUnsavedChanges {
+            showDiscardConfirmation = true
+        } else {
+            appState.resetProfile()
+            appState.isSettingsPresented = false
+        }
     }
 
     private func saveSettings() {

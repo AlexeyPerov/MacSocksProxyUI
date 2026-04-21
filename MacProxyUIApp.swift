@@ -8,5 +8,9 @@ struct MacProxyUIApp: App {
         WindowGroup("MacProxyUI") {
             MainView(appState: appDelegate.appState)
         }
+        .defaultSize(
+            width: MainView.minimumWindowWidth,
+            height: MainView.minimumWindowHeight
+        )
     }
 }
