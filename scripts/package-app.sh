@@ -29,6 +29,7 @@ macos_path="$contents_path/MacOS"
 resources_path="$contents_path/Resources"
 info_plist_template="$repo_root/Packaging/MacProxyUI-Info.plist"
 icon_generator="$repo_root/scripts/generate-app-icon.swift"
+default_icon_png="$repo_root/Images/green-icon.png"
 
 bundle_identifier="${MACPROXYUI_BUNDLE_ID:-com.macproxyui.app}"
 bundle_version="${MACPROXYUI_VERSION:-0.1.0}"
@@ -85,7 +86,11 @@ base_icon_png="$tmp_dir/AppIcon.png"
 iconset_path="$tmp_dir/AppIcon.iconset"
 icon_icns="$resources_path/AppIcon.icns"
 
-swift "$icon_generator" "$base_icon_png"
+if [[ -f "$default_icon_png" ]]; then
+  ditto "$default_icon_png" "$base_icon_png"
+else
+  swift "$icon_generator" "$base_icon_png"
+fi
 create_iconset "$base_icon_png" "$iconset_path"
 iconutil -c icns "$iconset_path" -o "$icon_icns"
 
@@ -99,6 +104,12 @@ iconutil -c icns "$iconset_path" -o "$icon_icns"
 ditto "$main_binary" "$macos_path/$app_name"
 ditto "$helper_binary" "$macos_path/$helper_name"
 chmod 755 "$macos_path/$app_name" "$macos_path/$helper_name"
+
+for resource_bundle in "$bin_path"/*.bundle; do
+  if [[ -d "$resource_bundle" ]]; then
+    ditto "$resource_bundle" "$resources_path/$(basename "$resource_bundle")"
+  fi
+done
 
 if command -v codesign >/dev/null 2>&1; then
   codesign --force --sign - "$macos_path/$helper_name"

@@ -24,6 +24,7 @@ let package = Package(
             exclude: [
                 "Tools",
                 "Packaging",
+                "Images",
                 "scripts",
                 "Tests",
                 "LICENSE",
@@ -68,6 +69,9 @@ let package = Package(
                 "Views/MainView.swift",
                 "Views/SettingsView.swift",
                 "Tray/StatusBarController.swift"
+            ],
+            resources: [
+                .copy("Images")
             ]
         ),
         .testTarget(

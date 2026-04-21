@@ -35,49 +35,26 @@ final class StatusBarController: NSObject {
     }
 
     private func applyStatusAppearance(_ status: ProxyStatus, to button: NSStatusBarButton) {
-        let symbolName: String
-        let tint: NSColor
         let label: String
 
         switch status {
         case .disconnected:
-            symbolName = "circle"
-            tint = .tertiaryLabelColor
             label = "Off"
         case .connecting:
-            symbolName = "circle.dotted"
-            tint = .systemYellow
             label = "…"
         case .reconnecting:
-            symbolName = "arrow.clockwise.circle.fill"
-            tint = .systemOrange
             label = "↻"
         case .connected:
-            symbolName = "circle.fill"
-            tint = .systemGreen
             label = "On"
         case .degraded:
-            symbolName = "exclamationmark.circle.fill"
-            tint = .systemOrange
             label = "!"
         case .error:
-            symbolName = "xmark.circle.fill"
-            tint = .systemRed
             label = "Err"
         }
 
         let isDarkMode = button.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        let finalTint: NSColor = isDarkMode ? .white : tint
-
-        let config = NSImage.SymbolConfiguration(pointSize: 11, weight: .semibold)
-        var accessibilityDescription = "Proxy status: \(status.title)"
-        if let details = status.details {
-            accessibilityDescription += ". \(details)"
-        }
-        let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: accessibilityDescription)?
-            .withSymbolConfiguration(config)
-        button.image = image
-        button.contentTintColor = finalTint
+        button.image = makeTrayImage(for: status)
+        button.contentTintColor = nil
         button.title = " \(label)"
         if isDarkMode {
             button.attributedTitle = NSAttributedString(
@@ -93,6 +70,31 @@ final class StatusBarController: NSObject {
             tip += "\n\(details)"
         }
         button.toolTip = tip
+    }
+
+    private func makeTrayImage(for status: ProxyStatus) -> NSImage? {
+        let imageName = imageName(for: status)
+        guard
+            let imageURL = Bundle.module.url(forResource: imageName, withExtension: "png", subdirectory: "Images"),
+            let image = NSImage(contentsOf: imageURL)
+        else {
+            return nil
+        }
+
+        image.size = NSSize(width: 14, height: 14)
+        image.isTemplate = false
+        return image
+    }
+
+    private func imageName(for status: ProxyStatus) -> String {
+        switch status {
+        case .connected:
+            return "green-icon"
+        case .degraded:
+            return "yellow-icon"
+        case .disconnected, .connecting, .reconnecting, .error:
+            return "red-icon"
+        }
     }
 
     private func updateMenuItemAvailability(for status: ProxyStatus) {
