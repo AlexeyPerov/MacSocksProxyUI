@@ -63,9 +63,11 @@ public final class AppState: ObservableObject {
     private var manuallyDisconnected = false
     private var connectProbeTask: Task<Void, Never>?
     private var healthMonitorTask: Task<Void, Never>?
+    private var wakeRefreshTask: Task<Void, Never>?
     private var reconnectAttempt = 0
 
-    private let healthCheckInterval: Duration = .seconds(45)
+    private let healthCheckIntervalConnected: Duration = .seconds(45)
+    private let healthCheckIntervalDegraded: Duration = .seconds(15)
     private let initialSocksProbeInterval: Duration = .milliseconds(250)
     private let initialSocksProbeTimeout: Duration = .seconds(4)
 
@@ -127,7 +129,7 @@ public final class AppState: ObservableObject {
         Task {
             await healthCheckService.updateExternalIPCheck(
                 enabled: profile.externalIPCheckEnabled,
-                urlString: profile.externalIPCheckURL
+                urlStrings: profile.normalizedExternalIPCheckURLs
             )
         }
     }
@@ -139,7 +141,7 @@ public final class AppState: ObservableObject {
         Task {
             await healthCheckService.updateExternalIPCheck(
                 enabled: profile.externalIPCheckEnabled,
-                urlString: profile.externalIPCheckURL
+                urlStrings: profile.normalizedExternalIPCheckURLs
             )
         }
         appendEvent(
@@ -178,7 +180,7 @@ public final class AppState: ObservableObject {
             return
         }
         guard profile.hasValidExternalIPCheckURL else {
-            status = .error("External IP check URL must be a valid HTTPS URL.")
+            status = .error("External IP check URL list must contain valid HTTPS URLs.")
             return
         }
 
@@ -234,7 +236,7 @@ public final class AppState: ObservableObject {
                 guard let self else { return }
                 await self.healthCheckService.updateExternalIPCheck(
                     enabled: self.profile.externalIPCheckEnabled,
-                    urlString: self.profile.externalIPCheckURL
+                    urlStrings: self.profile.normalizedExternalIPCheckURLs
                 )
                 await self.finishStartupHealthCheck()
             }
@@ -251,6 +253,8 @@ public final class AppState: ObservableObject {
         connectProbeTask = nil
         healthMonitorTask?.cancel()
         healthMonitorTask = nil
+        wakeRefreshTask?.cancel()
+        wakeRefreshTask = nil
         externalIP = "-"
         Task.detached { [sshService] in
             sshService.stop()
@@ -268,9 +272,44 @@ public final class AppState: ObservableObject {
         connectProbeTask = nil
         healthMonitorTask?.cancel()
         healthMonitorTask = nil
+        wakeRefreshTask?.cancel()
+        wakeRefreshTask = nil
         externalIP = "-"
         sshService.stop()
         status = .disconnected
+    }
+
+    public func handleSystemDidWake() {
+        guard sshService.isRunning, !manuallyDisconnected else { return }
+
+        wakeRefreshTask?.cancel()
+        appendEvent(message: "macOS wake detected. Running immediate tunnel health refresh.", source: .system)
+        wakeRefreshTask = Task { [weak self] in
+            guard let self else { return }
+
+            let localPort = await MainActor.run { self.profile.localSocksPort }
+            let outcome = await self.healthCheckService.performHealthCheckDetailed(localPort: localPort)
+            guard !Task.isCancelled else { return }
+
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                guard self.sshService.isRunning, !self.manuallyDisconnected else { return }
+
+                let wakeCheckFailed = self.didHealthCheckFailForWake(outcome)
+
+                if wakeCheckFailed {
+                    self.appendEvent(
+                        message: "Wake refresh failed. Forcing reconnect attempt.",
+                        source: .system
+                    )
+                    self.handleHealthCheckFailure(reason: "Wake refresh failed.")
+                    return
+                }
+
+                self.applySuccessfulHealthCheckOutcome(outcome, context: "wake")
+                self.startHealthMonitoring()
+            }
+        }
     }
 
     public var canConnectFromUI: Bool {
@@ -303,34 +342,23 @@ public final class AppState: ObservableObject {
         healthMonitorTask = Task { [weak self] in
             guard let self else { return }
             while !Task.isCancelled {
-                try? await Task.sleep(for: self.healthCheckInterval)
+                let interval = await MainActor.run { self.currentHealthCheckInterval() }
+                try? await Task.sleep(for: interval)
                 guard !Task.isCancelled else { break }
 
                 let port = await MainActor.run { self.profile.localSocksPort }
-                let (socksListening, ip) = await self.healthCheckService.performHealthCheck(localPort: port)
+                let outcome = await self.healthCheckService.performHealthCheckDetailed(localPort: port)
 
                 await MainActor.run { [weak self] in
                     guard let self else { return }
                     guard self.sshService.isRunning, !self.manuallyDisconnected else { return }
 
-                    if !socksListening {
+                    if !outcome.socksListening {
                         self.handleHealthCheckFailure()
                         return
                     }
 
-                    if let ip {
-                        self.externalIP = ip
-                        if case .degraded = self.status {
-                            self.status = .connected
-                        }
-                    } else {
-                        self.externalIP = "-"
-                        if self.profile.externalIPCheckEnabled {
-                            self.status = .degraded("External IP check through SOCKS failed (proxy may be partial).")
-                        } else {
-                            self.status = .connected
-                        }
-                    }
+                    self.applySuccessfulHealthCheckOutcome(outcome, context: "periodic")
                 }
             }
         }
@@ -370,44 +398,29 @@ public final class AppState: ObservableObject {
             source: .system
         )
 
-        let externalIP = await healthCheckService.fetchExternalIPThroughSocks(localPort: localPort)
+        let outcome = await healthCheckService.performHealthCheckDetailed(localPort: localPort)
         guard !Task.isCancelled else { return }
 
-        if profile.externalIPCheckEnabled, let externalIP {
-            self.externalIP = externalIP
-            status = .connected
-            appendEvent(
-                message: "Tunnel established: SOCKS localhost:\(localPort), externalIP=\(externalIP), mode=full.",
-                source: .system
-            )
-        } else if profile.externalIPCheckEnabled {
-            self.externalIP = "-"
-            status = .degraded("SOCKS port is open, but the external IP check via proxy failed.")
-            appendEvent(
-                message: "Tunnel partial: SOCKS localhost:\(localPort) is up but external IP check failed.",
-                source: .system
-            )
-        } else {
-            self.externalIP = "-"
-            status = .connected
-            appendEvent(
-                message: "Tunnel established: SOCKS localhost:\(localPort), external IP check disabled by settings.",
-                source: .system
-            )
-        }
+        applySuccessfulHealthCheckOutcome(outcome, context: "startup")
 
         reconnectAttempt = 0
         startHealthMonitoring()
     }
 
     private func handleHealthCheckFailure() {
+        handleHealthCheckFailure(reason: "SOCKS proxy stopped responding.")
+    }
+
+    private func handleHealthCheckFailure(reason: String) {
         externalIP = "-"
         healthMonitorTask?.cancel()
         healthMonitorTask = nil
         connectProbeTask?.cancel()
         connectProbeTask = nil
+        wakeRefreshTask?.cancel()
+        wakeRefreshTask = nil
 
-        scheduleReconnect(reason: "SOCKS proxy stopped responding.")
+        scheduleReconnect(reason: reason)
 
         Task.detached { [sshService] in
             sshService.stop()
@@ -419,6 +432,8 @@ public final class AppState: ObservableObject {
         healthMonitorTask = nil
         connectProbeTask?.cancel()
         connectProbeTask = nil
+        wakeRefreshTask?.cancel()
+        wakeRefreshTask = nil
         externalIP = "-"
 
         if manuallyDisconnected {
@@ -453,6 +468,10 @@ public final class AppState: ObservableObject {
     private func scheduleReconnect(reason: String) {
         reconnectCoordinator.invalidate()
         if reconnectAttempt >= reconnectPolicy.maxAttempts {
+            appendEvent(
+                message: "Reconnect stopped: attempts exhausted. reason=\(reason)",
+                source: .system
+            )
             status = .error("\(reason) Reconnect attempts exhausted. Open Settings, fix configuration, then reconnect.")
             reconnectAttempt = 0
             return
@@ -460,6 +479,10 @@ public final class AppState: ObservableObject {
 
         reconnectAttempt += 1
         let delay = reconnectPolicy.delaySeconds(forAttempt: reconnectAttempt)
+        appendEvent(
+            message: "Reconnect scheduled: attempt \(reconnectAttempt)/\(reconnectPolicy.maxAttempts) in \(delay)s. reason=\(reason)",
+            source: .system
+        )
         reconnectCoordinator.scheduleReconnect(
             after: delay,
             onTick: { [weak self] remaining in
@@ -470,7 +493,12 @@ public final class AppState: ObservableObject {
                 )
             },
             action: { [weak self] in
-                self?.connect()
+                guard let self else { return }
+                self.appendEvent(
+                    message: "Reconnect attempt \(self.reconnectAttempt) starting now.",
+                    source: .system
+                )
+                self.connect()
             }
         )
     }
@@ -515,7 +543,8 @@ public final class AppState: ObservableObject {
         let ipCheck = profile.externalIPCheckEnabled ? "on" : "off"
         let auth = profile.useKeyAuthentication ? "key" : "password"
         let label = profile.name.isEmpty ? "Default" : profile.name
-        return "name=\(label), destination=\(profile.destination), sshPort=\(profile.sshPort), socksPort=\(profile.localSocksPort), auth=\(auth), ipCheck=\(ipCheck)"
+        let endpointCount = profile.normalizedExternalIPCheckURLs.count
+        return "name=\(label), destination=\(profile.destination), sshPort=\(profile.sshPort), socksPort=\(profile.localSocksPort), auth=\(auth), ipCheck=\(ipCheck), ipEndpoints=\(endpointCount)"
     }
 
     private func profileDiffSummary(from old: ConnectionProfile, to new: ConnectionProfile) -> String {
@@ -527,7 +556,61 @@ public final class AppState: ObservableObject {
         if old.localSocksPort != new.localSocksPort { changed.append("socksPort") }
         if old.useKeyAuthentication != new.useKeyAuthentication { changed.append("authMode") }
         if old.externalIPCheckEnabled != new.externalIPCheckEnabled { changed.append("ipCheckEnabled") }
-        if old.externalIPCheckURL != new.externalIPCheckURL { changed.append("ipCheckURL") }
+        if old.normalizedExternalIPCheckURLs != new.normalizedExternalIPCheckURLs { changed.append("ipCheckURLs") }
         return changed.isEmpty ? "none" : changed.joined(separator: ",")
+    }
+
+    private func didHealthCheckFailForWake(_ outcome: HealthCheckOutcome) -> Bool {
+        guard outcome.socksListening else { return true }
+        guard profile.externalIPCheckEnabled else { return false }
+        if case .success = outcome.externalIPResult {
+            return false
+        }
+        return true
+    }
+
+    private func applySuccessfulHealthCheckOutcome(_ outcome: HealthCheckOutcome, context: String) {
+        guard outcome.socksListening else { return }
+
+        guard profile.externalIPCheckEnabled else {
+            externalIP = "-"
+            status = .connected
+            return
+        }
+
+        guard let result = outcome.externalIPResult else {
+            externalIP = "-"
+            status = .degraded("External IP check returned no result.")
+            appendEvent(message: "Tunnel partial (\(context)): no external health-check result.", source: .system)
+            return
+        }
+
+        switch result {
+        case .success(let ip, let endpoint):
+            externalIP = ip
+            status = .connected
+            let endpointLabel = endpoint.host ?? endpoint.absoluteString
+            appendEvent(
+                message: "Tunnel health (\(context)): external IP \(ip) via \(endpointLabel).",
+                source: .system
+            )
+        case .allFailed:
+            externalIP = "-"
+            let reason = result.summary
+            status = .degraded("External IP check failed (\(reason)).")
+            appendEvent(
+                message: "Tunnel partial (\(context)): external checks failed. \(reason)",
+                source: .system
+            )
+        }
+    }
+
+    private func currentHealthCheckInterval() -> Duration {
+        switch status {
+        case .degraded:
+            return healthCheckIntervalDegraded
+        default:
+            return healthCheckIntervalConnected
+        }
     }
 }

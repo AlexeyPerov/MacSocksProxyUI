@@ -68,6 +68,7 @@ let package = Package(
                 "AppDelegate.swift",
                 "Views/MainView.swift",
                 "Views/SettingsView.swift",
+                "Views/WindowTheme.swift",
                 "Tray/StatusBarController.swift"
             ],
             resources: [

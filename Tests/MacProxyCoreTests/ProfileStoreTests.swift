@@ -57,4 +57,38 @@ final class ProfileStoreTests: XCTestCase {
         let loadedAgain = store.load()
         XCTAssertEqual(loadedAgain, profile)
     }
+
+    func testConnectionProfileDecodesLegacySingleEndpointKey() throws {
+        let legacyJSON = """
+        {
+          "name": "Legacy",
+          "host": "legacy.example",
+          "username": "old-user",
+          "sshPort": 22,
+          "localSocksPort": 1080,
+          "useKeyAuthentication": false,
+          "externalIPCheckEnabled": true,
+          "externalIPCheckURL": "https://legacy.example/ip"
+        }
+        """
+        let data = Data(legacyJSON.utf8)
+        let decoded = try JSONDecoder().decode(ConnectionProfile.self, from: data)
+        XCTAssertEqual(decoded.externalIPCheckURLs, ["https://legacy.example/ip"])
+        XCTAssertEqual(decoded.externalIPCheckURL, "https://legacy.example/ip")
+    }
+
+    func testConnectionProfilePrefersMultiEndpointField() throws {
+        let json = """
+        {
+          "host": "new.example",
+          "username": "new-user",
+          "externalIPCheckEnabled": true,
+          "externalIPCheckURL": "https://old.example/ip",
+          "externalIPCheckURLs": ["https://one.example/ip", "https://two.example/ip"]
+        }
+        """
+        let data = Data(json.utf8)
+        let decoded = try JSONDecoder().decode(ConnectionProfile.self, from: data)
+        XCTAssertEqual(decoded.externalIPCheckURLs, ["https://one.example/ip", "https://two.example/ip"])
+    }
 }

@@ -11,9 +11,16 @@ struct SettingsView: View {
     @State private var useKeyAuthentication: Bool = false
     @State private var passwordEntry: String = ""
     @State private var externalIPCheckEnabled: Bool = true
-    @State private var externalIPCheckURL: String = ConnectionProfile.defaultExternalIPCheckURL
+    @State private var externalIPCheckURLsText: String = ConnectionProfile.defaultExternalIPCheckURL
     @State private var showDiscardConfirmation = false
     @State private var showDeletePasswordConfirmation = false
+
+    private var parsedExternalIPURLs: [String] {
+        externalIPCheckURLsText
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
 
     private var validationErrors: [String] {
         var errors: [String] = []
@@ -30,11 +37,15 @@ struct SettingsView: View {
             errors.append("Local SOCKS port must be between 1 and 65535.")
         }
         if externalIPCheckEnabled {
-            let rawURL = externalIPCheckURL.trimmingCharacters(in: .whitespacesAndNewlines)
-            let url = URL(string: rawURL)
-            let isValidHTTPS = url?.scheme?.lowercased() == "https" && (url?.host?.isEmpty == false)
-            if !isValidHTTPS {
-                errors.append("External IP check URL must be a valid HTTPS URL.")
+            if parsedExternalIPURLs.isEmpty {
+                errors.append("Add at least one external IP check URL.")
+            }
+            for rawURL in parsedExternalIPURLs {
+                let url = URL(string: rawURL)
+                let isValidHTTPS = url?.scheme?.lowercased() == "https" && (url?.host?.isEmpty == false)
+                if !isValidHTTPS {
+                    errors.append("Invalid HTTPS URL: \(rawURL)")
+                }
             }
         }
         return errors
@@ -43,7 +54,8 @@ struct SettingsView: View {
     private var hasUnsavedChanges: Bool {
         let trimmedHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedUsername = username.trimmingCharacters(in: .whitespacesAndNewlines)
-        let trimmedIPURL = externalIPCheckURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedURLs = parsedExternalIPURLs
+        let currentURLs = appState.profile.normalizedExternalIPCheckURLs
 
         return name != appState.profile.name ||
             trimmedHost != appState.profile.host ||
@@ -52,7 +64,7 @@ struct SettingsView: View {
             localSocksPort != appState.profile.localSocksPort ||
             useKeyAuthentication != appState.profile.useKeyAuthentication ||
             externalIPCheckEnabled != appState.profile.externalIPCheckEnabled ||
-            trimmedIPURL != appState.profile.externalIPCheckURL ||
+            normalizedURLs != currentURLs ||
             passwordEntry != appState.passwordEntry
     }
 
@@ -64,8 +76,16 @@ struct SettingsView: View {
                 } label: {
                     Image(systemName: "xmark")
                         .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(WindowTheme.primaryText)
                         .frame(width: 24, height: 24)
-                        .background(Circle().fill(.quaternary))
+                        .background(
+                            Circle()
+                                .fill(WindowTheme.panelBackground)
+                        )
+                        .overlay(
+                            Circle()
+                                .stroke(WindowTheme.primaryText.opacity(0.6), lineWidth: 1)
+                        )
                 }
                 .buttonStyle(.plain)
                 .keyboardShortcut(.escape)
@@ -88,8 +108,14 @@ struct SettingsView: View {
                 Divider()
                 Toggle("Check external IP through proxy", isOn: $externalIPCheckEnabled)
                 if externalIPCheckEnabled {
-                    TextField("External IP check URL (HTTPS)", text: $externalIPCheckURL)
-                        .disableAutocorrection(true)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("External IP check URLs (HTTPS, one per line)")
+                            .font(.footnote)
+                            .foregroundStyle(WindowTheme.secondaryText)
+                        TextEditor(text: $externalIPCheckURLsText)
+                            .font(.system(size: 13, weight: .regular, design: .monospaced))
+                            .frame(minHeight: 82, maxHeight: 120)
+                    }
                 }
 
                 if !validationErrors.isEmpty {
@@ -97,7 +123,7 @@ struct SettingsView: View {
                         ForEach(validationErrors, id: \.self) { error in
                             Label(error, systemImage: "xmark.circle.fill")
                                 .font(.footnote)
-                                .foregroundStyle(.red)
+                                .foregroundStyle(WindowTheme.errorLog)
                         }
                     }
                 }
@@ -114,7 +140,7 @@ struct SettingsView: View {
                                 : "Enter your SSH password before Connect. It is saved to Keychain and reused for reconnects."
                         )
                         .font(.footnote)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(WindowTheme.secondaryText)
                         Spacer(minLength: 8)
                         Button("Remove from Keychain") {
                             showDeletePasswordConfirmation = true
@@ -141,6 +167,9 @@ struct SettingsView: View {
             }
         }
         .padding(10)
+        .foregroundStyle(WindowTheme.primaryText)
+        .background(WindowTheme.windowBackground.ignoresSafeArea())
+        .preferredColorScheme(.dark)
         .frame(minWidth: 420)
         .onAppear {
             loadCurrentValues()
@@ -180,7 +209,7 @@ struct SettingsView: View {
         localSocksPort = profile.localSocksPort
         useKeyAuthentication = profile.useKeyAuthentication
         externalIPCheckEnabled = profile.externalIPCheckEnabled
-        externalIPCheckURL = profile.externalIPCheckURL
+        externalIPCheckURLsText = profile.normalizedExternalIPCheckURLs.joined(separator: "\n")
         passwordEntry = appState.passwordEntry
     }
 
@@ -208,7 +237,7 @@ struct SettingsView: View {
         appState.profile.localSocksPort = localSocksPort
         appState.profile.useKeyAuthentication = useKeyAuthentication
         appState.profile.externalIPCheckEnabled = externalIPCheckEnabled
-        appState.profile.externalIPCheckURL = externalIPCheckURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        appState.profile.externalIPCheckURLs = parsedExternalIPURLs
         appState.passwordEntry = passwordEntry
         appState.saveProfile()
     }
